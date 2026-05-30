@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: trade_service_db
+    environment:
+      - POSTGRES_USER=quant
+      - POSTGRES_PASSWORD=quant_pass
+      - POSTGRES_DB=trade_service_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+volumes:
+  timescale_data:

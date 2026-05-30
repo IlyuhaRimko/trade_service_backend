@@ -1,0 +1,14 @@
+# Секреты и доступы
+.env
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Кэш Python
+__pycache__/
+*.pyc
+
+# Настройки PyCharm
+.idea/
