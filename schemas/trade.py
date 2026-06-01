@@ -21,9 +21,9 @@ class GeminiSignalResponse(BaseModel):
         ...,
         description="Торговое действие: BUY (покупать), SELL (продавать), HOLD (держать) или REJECT (отклонить технический сигнал)"
     )
+    # ИЗМЕНЕНИЕ ЗДЕСЬ: Убрали ge=0.0 и le=1.0
     confidence: float = Field(
         ...,
-        ge=0.0, le=1.0,
         description="Уровень уверенности ИИ в сигнале от 0.0 до 1.0"
     )
     reasoning: str = Field(

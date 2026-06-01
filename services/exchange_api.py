@@ -1,53 +1,76 @@
-import ccxt.async_support as ccxt
+import aiohttp
 import logging
+import socket
 from typing import List, Any
 
-# Настраиваем базовое логирование, чтобы видеть ошибки в консоли
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 class ExchangeService:
-    def __init__(self, exchange_id: str = 'currencycom'):
-        """
-        Инициализация подключения к криптобирже.
-        По умолчанию используем currencycom (Dzengi.com).
-        """
-        try:
-            # Динамически получаем класс биржи из CCXT
-            exchange_class = getattr(ccxt, exchange_id)
-            self.exchange = exchange_class({
-                'enableRateLimit': True,  # Включаем встроенную защиту от бана по IP (Rate Limit)
-            })
-            logger.info(f"Успешно инициализирован коннектор для биржи: {exchange_id}")
-        except AttributeError:
-            logger.error(f"Биржа {exchange_id} не найдена в библиотеке CCXT.")
-            raise
+    def __init__(self):
+        self.base_url = "https://api-adapter.dzengi.com/api/v1"
+        self.session = None
+
+    async def _get_session(self):
+        if self.session is None or self.session.closed:
+            # Принудительно заставляем aiohttp использовать системный DNS Windows,
+            # игнорируя мертвые VPN-адаптеры
+            from aiohttp.resolver import ThreadedResolver
+
+            connector = aiohttp.TCPConnector(
+                resolver=ThreadedResolver(),  # Системный резолвер
+                family=socket.AF_INET,  # Только IPv4
+                use_dns_cache=False  # Никакого кэша
+            )
+            self.session = aiohttp.ClientSession(connector=connector)
+        return self.session
 
     async def fetch_candles(self, symbol: str, timeframe: str, limit: int = 100) -> List[List[Any]]:
         """
-        Запрашивает исторические свечи (OHLCV) для конкретной монеты.
-        Формат ответа CCXT: [ [timestamp, open, high, low, close, volume], ... ]
+        Запрашивает исторические свечи (OHLCV) напрямую через REST API Dzengi.
         """
+        session = await self._get_session()
+        endpoint = f"{self.base_url}/klines"
+
+        # Формируем параметры запроса по документации Dzengi
+        params = {
+            "symbol": symbol,
+            "interval": timeframe,
+            "limit": limit
+        }
+
         try:
-            # Асинхронный запрос к API биржи
-            candles = await self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            return candles
-        except ccxt.NetworkError as e:
-            logger.error(f"Ошибка сети при получении свечей {symbol}: {e}")
-            raise
-        except ccxt.ExchangeError as e:
-            logger.error(f"Ошибка API биржи для {symbol}: {e}")
-            raise
+            async with session.get(endpoint, params=params) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(f"Ошибка API Dzengi HTTP {response.status}: {text}")
+                    return []
+
+                data = await response.json()
+
+                # Структура ответа API Dzengi (как у Binance):
+                # [ [Open time, Open, High, Low, Close, Volume, ...] ]
+                ohlcv = []
+                for candle in data:
+                    ohlcv.append([
+                        int(candle[0]),  # timestamp (ms)
+                        float(candle[1]),  # open
+                        float(candle[2]),  # high
+                        float(candle[3]),  # low
+                        float(candle[4]),  # close
+                        float(candle[5])  # volume
+                    ])
+                return ohlcv
+
         except Exception as e:
-            logger.error(f"Непредвиденная ошибка: {e}")
-            raise
+            logger.error(f"Сетевая ошибка при получении свечей {symbol}: {e}")
+            return []
 
     async def close(self):
-        """
-        Асинхронные сессии в CCXT необходимо закрывать вручную,
-        чтобы не возникало утечек памяти.
-        """
-        await self.exchange.close()
+        """Корректное закрытие HTTP-сессии при остановке демона."""
+        if self.session and not self.session.closed:
+            await self.session.close()
 
-# Создаем глобальный объект сервиса для импорта в другие модули
+
+# Создаем глобальный объект сервиса для импорта
 exchange_api_service = ExchangeService()
