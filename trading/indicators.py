@@ -64,6 +64,34 @@ class TechnicalAnalyzer:
 
         return {"signal": False, "context": None}
 
+    @staticmethod
+    def get_all_signals(df: pd.DataFrame) -> list:
+        """
+        Проходит по всему историческому ДатаФрейму и находит все точки входа.
+        """
+        signals = []
+        # Начинаем с 35-й свечи, чтобы RSI и MACD успели "накопить" историю расчетов
+        for i in range(35, len(df)):
+            current = df.iloc[i]
+            previous = df.iloc[i - 1]
+
+            price_lower_low = current['low'] < previous['low']
+            rsi_oversold = current['RSI'] < 30
+            macd_col = 'MACDh_12_26_9'
+            macd_divergence = (current[macd_col] < 0) and (current[macd_col] > previous[macd_col])
+
+            if price_lower_low and rsi_oversold and macd_divergence:
+                signals.append({
+                    "index": i,
+                    "time": current['time'],
+                    "context": {
+                        "price": float(current['close']),
+                        "rsi": float(current['RSI']),
+                        "macd_histogram": float(current[macd_col]),
+                        "description": "Сильная бычья дивергенция (Цена падает, RSI в перепроданности, MACD растет)."
+                    }
+                })
+        return signals
 
 # Создаем глобальный объект анализатора
 analyzer = TechnicalAnalyzer()
