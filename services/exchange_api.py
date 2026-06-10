@@ -1,6 +1,7 @@
 import aiohttp
 import logging
 import socket
+import asyncio
 from typing import List, Any
 
 logger = logging.getLogger(__name__)
@@ -8,31 +9,28 @@ logger = logging.getLogger(__name__)
 
 class ExchangeService:
     def __init__(self):
+        # Базовый URL публичного API Dzengi.com
         self.base_url = "https://api-adapter.dzengi.com/api/v1"
         self.session = None
 
     async def _get_session(self):
         if self.session is None or self.session.closed:
-            # Принудительно заставляем aiohttp использовать системный DNS Windows,
-            # игнорируя мертвые VPN-адаптеры
             from aiohttp.resolver import ThreadedResolver
-
             connector = aiohttp.TCPConnector(
-                resolver=ThreadedResolver(),  # Системный резолвер
-                family=socket.AF_INET,  # Только IPv4
-                use_dns_cache=False  # Никакого кэша
+                resolver=ThreadedResolver(),
+                family=socket.AF_INET,
+                use_dns_cache=False
             )
             self.session = aiohttp.ClientSession(connector=connector)
         return self.session
 
     async def fetch_candles(self, symbol: str, timeframe: str, limit: int = 100) -> List[List[Any]]:
         """
-        Запрашивает исторические свечи (OHLCV) напрямую через REST API Dzengi.
+        Запрашивает текущие свечи (OHLCV).
         """
         session = await self._get_session()
         endpoint = f"{self.base_url}/klines"
 
-        # Формируем параметры запроса по документации Dzengi
         params = {
             "symbol": symbol,
             "interval": timeframe,
@@ -41,6 +39,9 @@ class ExchangeService:
 
         try:
             async with session.get(endpoint, params=params) as response:
+                # ВЫВОДИМ ПОЛНЫЙ СФОРМИРОВАННЫЙ URL ЗАПРОСА
+                logger.info(f"🔗 Ссылка отправленного запроса: {response.url}")
+
                 if response.status != 200:
                     text = await response.text()
                     logger.error(f"Ошибка API Dzengi HTTP {response.status}: {text}")
@@ -48,17 +49,14 @@ class ExchangeService:
 
                 data = await response.json()
 
-                # Структура ответа API Dzengi (как у Binance):
-                # [ [Open time, Open, High, Low, Close, Volume, ...] ]
+                # ВЫВОДИМ ПРЕВЬЮ ПОЛУЧЕННОГО ОТВЕТА (первые 2 свечи, чтобы не спамить консоль)
+                logger.info(f"📥 Получен ответ от сервера. Всего свечей: {len(data)}. Превью данных: {data[:2]}")
+
                 ohlcv = []
                 for candle in data:
                     ohlcv.append([
-                        int(candle[0]),  # timestamp (ms)
-                        float(candle[1]),  # open
-                        float(candle[2]),  # high
-                        float(candle[3]),  # low
-                        float(candle[4]),  # close
-                        float(candle[5])  # volume
+                        int(candle[0]), float(candle[1]), float(candle[2]),
+                        float(candle[3]), float(candle[4]), float(candle[5])
                     ])
                 return ohlcv
 
@@ -68,8 +66,7 @@ class ExchangeService:
 
     async def fetch_historical_candles(self, symbol: str, timeframe: str, start_time: int, end_time: int) -> list:
         """
-        Скачивает исторические свечи через пагинацию (по 1000 шт за раз).
-        start_time и end_time передаются в миллисекундах.
+        Скачивает исторические свечи кусками для бэктеста.
         """
         session = await self._get_session()
         endpoint = f"{self.base_url}/klines"
@@ -86,12 +83,20 @@ class ExchangeService:
             }
             try:
                 async with session.get(endpoint, params=params) as response:
+                    # ВЫВОДИМ ПОЛНЫЙ URL ДЛЯ КАЖДОЙ СТРАНИЦЫ ИСТОРИИ
+                    logger.info(f"🔗 Ссылка исторического запроса: {response.url}")
+
                     if response.status != 200:
+                        text = await response.text()
+                        logger.error(f"Ошибка пагинации HTTP {response.status}: {text}")
                         break
 
                     data = await response.json()
-                    if not data:  # Если биржа вернула пустой список - мы дошли до конца
+                    if not data:
                         break
+
+                    # Выводим превью пакета данных
+                    logger.info(f"📥 Скачан пакет истории. Получено свечей: {len(data)}")
 
                     for candle in data:
                         all_candles.append([
@@ -99,9 +104,9 @@ class ExchangeService:
                             float(candle[3]), float(candle[4]), float(candle[5])
                         ])
 
-                    # Сдвигаем стартовое время для следующего запроса (время последней свечи + 1 мс)
                     last_candle_time = int(data[-1][0])
                     current_start = last_candle_time + 1
+                    await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"Ошибка пагинации исторических свечей: {e}")
@@ -110,10 +115,8 @@ class ExchangeService:
         return all_candles
 
     async def close(self):
-        """Корректное закрытие HTTP-сессии при остановке демона."""
         if self.session and not self.session.closed:
             await self.session.close()
 
 
-# Создаем глобальный объект сервиса для импорта
 exchange_api_service = ExchangeService()

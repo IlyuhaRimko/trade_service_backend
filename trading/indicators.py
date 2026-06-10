@@ -7,91 +7,93 @@ logger = logging.getLogger(__name__)
 
 class TechnicalAnalyzer:
     @staticmethod
-    def prepare_dataframe(ohlcv_data: list) -> pd.DataFrame:
+    def prepare_dataframe(ohlcv_data: list, lower_zone: int = 20, upper_zone: int = 80) -> pd.DataFrame:
         """
-        Преобразует сырые данные CCXT в таблицу Pandas и рассчитывает индикаторы.
+        Преобразует сырые данные и принимает динамические зоны для Stochastic RSI.
         """
-        # Создаем DataFrame из массива списков
         df = pd.DataFrame(ohlcv_data, columns=['time', 'open', 'high', 'low', 'close', 'volume'])
-
-        # Переводим timestamp из миллисекунд в нормальный формат даты
         df['time'] = pd.to_datetime(df['time'], unit='ms')
 
-        # Рассчитываем RSI (стандартный период 14)
-        df['RSI'] = ta.rsi(df['close'], length=14)
+        stoch = ta.stochrsi(df['close'], length=14, rsi_length=14, k=3, d=3)
 
-        # Рассчитываем MACD (стандартные параметры 12, 26, 9)
-        # pandas-ta автоматически создаст 3 колонки:
-        # MACD_12_26_9, MACDh_12_26_9 (Гистограмма) и MACDs_12_26_9 (Сигнальная линия)
-        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-        df = pd.concat([df, macd], axis=1)
+        k_col = [c for c in stoch.columns if 'k' in c.lower()][0]
+        d_col = [c for c in stoch.columns if 'd' in c.lower()][0]
 
+        df['stoch_k'] = stoch[k_col]
+        df['stoch_d'] = stoch[d_col]
+
+        df['prev_k'] = df['stoch_k'].shift(1)
+        df['prev_d'] = df['stoch_d'].shift(1)
+
+        # Используем ПЕРЕДАННЫЕ параметры lower_zone и upper_zone вместо жестких 20/80
+        df['buy_cross'] = (df['stoch_k'] > df['stoch_d']) & \
+                          (df['prev_k'] <= df['prev_d']) & \
+                          (df['stoch_k'] < lower_zone)
+
+        df['sell_cross'] = (df['stoch_k'] < df['stoch_d']) & \
+                           (df['prev_k'] >= df['prev_d']) & \
+                           (df['stoch_k'] > upper_zone)
+
+        df.set_index('time', inplace=True)
         return df
 
     @staticmethod
-    def check_buy_signal(df: pd.DataFrame) -> dict:
+    def get_mtf_signals(df_4h: pd.DataFrame, df_1h: pd.DataFrame, df_30m: pd.DataFrame, conf_lower: int = 30,
+                        conf_upper: int = 70) -> list:
         """
-        Проверяет последние свечи на наличие паттерна бычьей дивергенции.
-        Возвращает словарь с результатом и контекстом для Gemini.
-        """
-        if len(df) < 2:
-            return {"signal": False, "context": None}
-
-        # Берем текущую (последнюю закрытую) и предыдущую свечи
-        current = df.iloc[-1]
-        previous = df.iloc[-2]
-
-        # 1. Цена обновила локальный минимум
-        price_lower_low = current['low'] < previous['low']
-
-        # 2. RSI находится в зоне перепроданности (< 30)
-        rsi_oversold = current['RSI'] < 30
-
-        # 3. Дивергенция MACD (гистограмма отрицательная, но начинает расти)
-        macd_col = 'MACDh_12_26_9'
-        macd_divergence = (current[macd_col] < 0) and (current[macd_col] > previous[macd_col])
-
-        # Если все три условия совпали - генерируем первичный технический триггер
-        if price_lower_low and rsi_oversold and macd_divergence:
-            technical_context = {
-                "price": float(current['close']),
-                "rsi": float(current['RSI']),
-                "macd_histogram": float(current[macd_col]),
-                "description": "Сильная бычья дивергенция (Цена падает, RSI в перепроданности, гистограмма MACD растет)."
-            }
-            logger.info("Найден технический сетап для ЛОНГА!")
-            return {"signal": True, "context": technical_context}
-
-        return {"signal": False, "context": None}
-
-    @staticmethod
-    def get_all_signals(df: pd.DataFrame) -> list:
-        """
-        Проходит по всему историческому ДатаФрейму и находит все точки входа.
+        Мульти-таймфреймовый анализатор (MTF).
+        Главный триггер: 4H (строгое перекрестие).
+        Подтверждение: 1H и 30M (просто нахождение %K в экстремальных зонах внутри окна).
         """
         signals = []
-        # Начинаем с 35-й свечи, чтобы RSI и MACD успели "накопить" историю расчетов
-        for i in range(35, len(df)):
-            current = df.iloc[i]
-            previous = df.iloc[i - 1]
 
-            price_lower_low = current['low'] < previous['low']
-            rsi_oversold = current['RSI'] < 30
-            macd_col = 'MACDh_12_26_9'
-            macd_divergence = (current[macd_col] < 0) and (current[macd_col] > previous[macd_col])
+        # Пробегаемся по всем 4-часовым свечам
+        for timestamp, row_4h in df_4h.iloc[30:].iterrows():
+            close_time = timestamp + pd.Timedelta(hours=4)
 
-            if price_lower_low and rsi_oversold and macd_divergence:
-                signals.append({
-                    "index": i,
-                    "time": current['time'],
-                    "context": {
-                        "price": float(current['close']),
-                        "rsi": float(current['RSI']),
-                        "macd_histogram": float(current[macd_col]),
-                        "description": "Сильная бычья дивергенция (Цена падает, RSI в перепроданности, MACD растет)."
-                    }
-                })
+            # Вырезаем окна младших ТФ
+            window_1h = df_1h.loc[timestamp: timestamp + pd.Timedelta(hours=3)]
+            window_30m = df_30m.loc[timestamp: timestamp + pd.Timedelta(hours=3, minutes=30)]
+
+            # --- ПРОВЕРКА НА ЛОНГ (ПОКУПКА) ---
+            if row_4h['buy_cross']:
+                # МАГИЯ ЗДЕСЬ: Ищем не перекрестие, а просто факт падения stoch_k < conf_lower
+                # .any() означает: "падала ли линия %K ниже зоны хотя бы на одной свече в этом окне?"
+                conf_1h = (window_1h['stoch_k'] < conf_lower).any() if not window_1h.empty else False
+                conf_30m = (window_30m['stoch_k'] < conf_lower).any() if not window_30m.empty else False
+
+                # У тебя стоит 'and' - жесткое подтверждение от ОБОИХ младших ТФ
+                if conf_1h and conf_30m:
+                    signals.append({
+                        "time": close_time,
+                        "action": "BUY",
+                        "price": float(row_4h['close']),
+                        "context": {
+                            "4h_stoch_k": round(float(row_4h['stoch_k']), 2),
+                            "confirmed_by_1h": bool(conf_1h),
+                            "confirmed_by_30m": bool(conf_30m)
+                        }
+                    })
+
+            # --- ПРОВЕРКА НА ШОРТ (ПРОДАЖА) ---
+            elif row_4h['sell_cross']:
+                # Аналогично: заходила ли линия %K в зону перекупленности (> conf_upper)
+                conf_1h = (window_1h['stoch_k'] > conf_upper).any() if not window_1h.empty else False
+                conf_30m = (window_30m['stoch_k'] > conf_upper).any() if not window_30m.empty else False
+
+                if conf_1h and conf_30m:
+                    signals.append({
+                        "time": close_time,
+                        "action": "SELL",
+                        "price": float(row_4h['close']),
+                        "context": {
+                            "4h_stoch_k": round(float(row_4h['stoch_k']), 2),
+                            "confirmed_by_1h": bool(conf_1h),
+                            "confirmed_by_30m": bool(conf_30m)
+                        }
+                    })
+
         return signals
 
-# Создаем глобальный объект анализатора
+
 analyzer = TechnicalAnalyzer()
